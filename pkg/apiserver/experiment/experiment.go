@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/chaos-mesh/chaos-mesh/pkg/selector"
 	"net/http"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/chaos-mesh/chaos-mesh/pkg/config"
 	"github.com/chaos-mesh/chaos-mesh/pkg/core"
 
+	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -141,6 +143,36 @@ func (s *Service) createExperiment(c *gin.Context) {
 		c.Status(http.StatusBadRequest)
 		_ = c.Error(utils.ErrInvalidRequest.WrapWithNoMessage(err))
 		return
+	}
+
+	ctx := context.TODO()
+	affectedPods, err := selector.SelectPods(ctx, kubeCli, nil, exp.Scope.ParseSelector(), s.conf.ClusterScoped, s.conf.TargetNamespace, s.conf.AllowedNamespaces, s.conf.IgnoredNamespaces)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		_ = c.Error(utils.ErrInternalServer.WrapWithNoMessage(err))
+		return
+	}
+	if len(affectedPods) == 0 {
+		c.Status(http.StatusBadRequest)
+		_ = c.Error(utils.ErrInvalidRequest.New("No Pods are matching selected chaos experiment criteria"))
+		return
+	}
+	affectedEnvironments := make(map[string][]v1.Pod)
+	for _, pod := range affectedPods {
+		env, found := pod.Labels["environment"]
+		if !found || env !="customenvs"  {
+			c.Status(http.StatusBadRequest)
+			_ = c.Error(utils.ErrInvalidRequest.New(fmt.Sprintf("It's only allowed to run experiments in custom environments. Targetting '%s' env. is not allowed", env)))
+			return
+		}
+
+		envName := pod.Labels["custom-environment-name"]
+		affectedEnvironments[envName] = append(affectedEnvironments[envName], pod)
+		if len(affectedEnvironments) > 1  {
+			c.Status(http.StatusBadRequest)
+			_ = c.Error(utils.ErrInvalidRequest.New("It's not allowed to run experiments that target Pods from multiple environments"))
+			return
+		}
 	}
 
 	createFuncs := map[string]createExperimentFunc{
